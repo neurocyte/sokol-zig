@@ -41,6 +41,42 @@ pub const SokolBackend = enum {
     vulkan,
 };
 
+pub const SokolLib = enum {
+    log,
+    app,
+    gfx,
+    time,
+    audio,
+    gl,
+    debugtext,
+    shape,
+    glue,
+    fetch,
+    framebuffer,
+};
+
+pub const all_libs: []const SokolLib = &.{ .log, .app, .gfx, .time, .audio, .gl, .debugtext, .shape, .glue, .fetch, .framebuffer };
+
+// parse a comma-separated library list (e.g. "log,gfx") into a SokolLib set
+fn parseLibs(b: *Build, csv: []const u8) []const SokolLib {
+    var libs: std.ArrayList(SokolLib) = .empty;
+    var it = std.mem.splitScalar(u8, csv, ',');
+    while (it.next()) |item| {
+        const name = std.mem.trim(u8, item, " \t");
+        if (name.len == 0) continue;
+        const lib = std.meta.stringToEnum(SokolLib, name) orelse {
+            std.log.err("unknown sokol library '{s}' in -Dlibs (valid: log,app,gfx,time,audio,gl,debugtext,shape,glue,fetch,framebuffer)", .{name});
+            std.process.exit(1);
+        };
+        libs.append(b.allocator, lib) catch @panic("OOM");
+    }
+    return libs.toOwnedSlice(b.allocator) catch @panic("OOM");
+}
+
+fn hasLib(libs: []const SokolLib, lib: SokolLib) bool {
+    return std.mem.indexOfScalar(SokolLib, libs, lib) != null;
+}
+
 pub const TargetPlatform = enum {
     android,
     linux,
@@ -77,6 +113,7 @@ pub fn build(b: *Build) !void {
     const opt_sokol_imgui_cprefix = b.option([]const u8, "sokol_imgui_cprefix", "Override Dear ImGui C bindings prefix for sokol_imgui.h (see SOKOL_IMGUI_CPREFIX)");
     const opt_cimgui_header_path = b.option([]const u8, "cimgui_header_path", "Override the Dear ImGui C bindings header name (default: cimgui.h)");
     const opt_dynamic_linkage = b.option(bool, "dynamic_linkage", "Build sokol_clib artifact as dynamic link library.") orelse false;
+    const opt_libs = b.option([]const u8, "libs", "Comma-separated subset of sokol libraries to compile, e.g. -Dlibs=log,gfx (default: all of them)");
     const sokol_backend: SokolBackend = if (opt_use_gl) .gl else if (opt_use_gles3) .gles3 else if (opt_use_wgpu) .wgpu else if (opt_use_vulkan) .vulkan else .auto;
 
     const target = b.standardTargetOptions(.{});
@@ -103,6 +140,7 @@ pub fn build(b: *Build) !void {
         .cimgui_header_path = opt_cimgui_header_path,
         .emsdk = emsdk,
         .dont_link_system_libs = opt_dont_link_system_libs,
+        .libs = if (opt_libs) |csv| parseLibs(b, csv) else all_libs,
     });
     mod_sokol.linkLibrary(lib_sokol);
 
@@ -148,22 +186,25 @@ pub const LibSokolOptions = struct {
     sokol_imgui_cprefix: ?[]const u8 = null,
     cimgui_header_path: ?[]const u8 = null,
     dont_link_system_libs: bool = true,
+    libs: []const SokolLib = all_libs,
 };
 pub fn buildLibSokol(b: *Build, options: LibSokolOptions) !*Build.Step.Compile {
     const csrc_root = "src/sokol/c/";
-    const csources = [_][]const u8{
-        "sokol_log.c",
-        "sokol_app.c",
-        "sokol_gfx.c",
-        "sokol_time.c",
-        "sokol_audio.c",
-        "sokol_gl.c",
-        "sokol_debugtext.c",
-        "sokol_shape.c",
-        "sokol_glue.c",
-        "sokol_fetch.c",
-        "sokol_framebuffer.c",
+    const csources = [_]struct { lib: SokolLib, file: []const u8 }{
+        .{ .lib = .log, .file = "sokol_log.c" },
+        .{ .lib = .app, .file = "sokol_app.c" },
+        .{ .lib = .gfx, .file = "sokol_gfx.c" },
+        .{ .lib = .time, .file = "sokol_time.c" },
+        .{ .lib = .audio, .file = "sokol_audio.c" },
+        .{ .lib = .gl, .file = "sokol_gl.c" },
+        .{ .lib = .debugtext, .file = "sokol_debugtext.c" },
+        .{ .lib = .shape, .file = "sokol_shape.c" },
+        .{ .lib = .glue, .file = "sokol_glue.c" },
+        .{ .lib = .fetch, .file = "sokol_fetch.c" },
+        .{ .lib = .framebuffer, .file = "sokol_framebuffer.c" },
     };
+    const with_app = hasLib(options.libs, .app);
+    const with_audio = hasLib(options.libs, .audio);
     const mod = b.addModule("mod_sokol_clib", .{
         .target = options.target,
         .optimize = options.optimize,
@@ -228,20 +269,28 @@ pub fn buildLibSokol(b: *Build, options: LibSokolOptions) !*Build.Step.Compile {
         try cflags.appendBounded("-ObjC");
         if (link_system_libs) {
             mod.linkFramework("QuartzCore", .{});
-            mod.linkFramework("AudioToolbox", .{});
+            if (with_audio) {
+                mod.linkFramework("AudioToolbox", .{});
+            }
             if (.metal == backend) {
                 mod.linkFramework("Metal", .{});
             }
             if (mod_target.os.tag == .ios) {
                 mod.linkFramework("Foundation", .{});
-                mod.linkFramework("UIKit", .{});
-                mod.linkFramework("AVFoundation", .{});
+                if (with_app) {
+                    mod.linkFramework("UIKit", .{});
+                }
+                if (with_audio) {
+                    mod.linkFramework("AVFoundation", .{});
+                }
                 if (.gl == backend) {
                     mod.linkFramework("OpenGLES", .{});
                     mod.linkFramework("GLKit", .{});
                 }
             } else if (mod_target.os.tag == .macos) {
-                mod.linkFramework("AppKit", .{});
+                if (with_app) {
+                    mod.linkFramework("AppKit", .{});
+                }
                 if (.gl == backend) {
                     mod.linkFramework("OpenGL", .{});
                 }
@@ -263,18 +312,20 @@ pub fn buildLibSokol(b: *Build, options: LibSokolOptions) !*Build.Step.Compile {
         if (!options.use_wayland) try cflags.appendBounded("-DSOKOL_DISABLE_WAYLAND");
         const link_egl = options.use_egl or options.use_wayland;
         if (link_system_libs) {
-            mod.linkSystemLibrary("asound", .{});
+            if (with_audio) {
+                mod.linkSystemLibrary("asound", .{});
+            }
             if (.vulkan == backend) {
                 mod.linkSystemLibrary("vulkan", .{});
             } else {
                 mod.linkSystemLibrary("GL", .{});
             }
-            if (options.use_x11) {
+            if (options.use_x11 and with_app) {
                 mod.linkSystemLibrary("X11", .{});
                 mod.linkSystemLibrary("Xi", .{});
                 mod.linkSystemLibrary("Xcursor", .{});
             }
-            if (options.use_wayland) {
+            if (options.use_wayland and with_app) {
                 mod.linkSystemLibrary("wayland-client", .{});
                 mod.linkSystemLibrary("wayland-cursor", .{});
                 mod.linkSystemLibrary("wayland-egl", .{});
@@ -301,10 +352,12 @@ pub fn buildLibSokol(b: *Build, options: LibSokolOptions) !*Build.Step.Compile {
 
     // finally add the C source files
     inline for (csources) |csrc| {
-        mod.addCSourceFile(.{
-            .file = b.path(csrc_root ++ csrc),
-            .flags = cflags.items,
-        });
+        if (hasLib(options.libs, csrc.lib)) {
+            mod.addCSourceFile(.{
+                .file = b.path(csrc_root ++ csrc.file),
+                .flags = cflags.items,
+            });
+        }
     }
 
     // optional Dear ImGui support, the called is required to also
