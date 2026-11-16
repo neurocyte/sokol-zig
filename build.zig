@@ -6,6 +6,13 @@ const OptimizeMode = std.builtin.OptimizeMode;
 // re-export the shader compiler module for use by upstream projects
 pub const shdc = @import("shdc");
 
+// sokol-tools-bin ships sokol-shdc only for these hosts (see shdc.getShdcSubPath)
+pub const host_has_shdc = switch (builtin.os.tag) {
+    .macos, .linux => builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aarch64,
+    .windows => builtin.cpu.arch == .x86_64,
+    else => false,
+};
+
 const examples = [_]Example{
     .{ .name = "clear" },
     .{ .name = "triangle", .has_shader = true },
@@ -145,7 +152,7 @@ pub fn build(b: *Build) !void {
     mod_sokol.linkLibrary(lib_sokol);
 
     // examples build step
-    try buildExamples(b, .{
+    if (host_has_shdc) try buildExamples(b, .{
         .target = target,
         .optimize = optimize,
         .backend = sokol_backend,
